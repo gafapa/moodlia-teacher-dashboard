@@ -1,4 +1,6 @@
 const STORAGE_KEY = "moodle-control-settings";
+const SESSION_TOKEN_KEY = "moodle-control-session-token";
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 const icons = {
   book: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z"/></svg>',
@@ -113,20 +115,63 @@ function offsetDate(days) {
 }
 
 function readSettings() {
+  let stored = {};
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || { baseUrl: "", token: "" };
+    stored = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
   } catch {
-    return { baseUrl: "", token: "" };
+    stored = {};
   }
+  if (stored.token) {
+    try {
+      sessionStorage.setItem(SESSION_TOKEN_KEY, stored.token);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ baseUrl: stored.baseUrl || "" }));
+    } catch {
+      // Continue with in-memory settings when browser storage is unavailable.
+    }
+  }
+  let token = "";
+  try {
+    token = sessionStorage.getItem(SESSION_TOKEN_KEY) || "";
+  } catch {
+    token = "";
+  }
+  return { baseUrl: stored.baseUrl || "", token };
 }
 
 function saveSettings(settings) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ baseUrl: settings.baseUrl }));
+  } catch {
+    // The current connection still works when persistent storage is blocked.
+  }
+  try {
+    if (settings.token) sessionStorage.setItem(SESSION_TOKEN_KEY, settings.token);
+    else sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  } catch {
+    // The active state retains the token for this page lifecycle.
+  }
+}
+
+function normalizeServiceBaseUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl || "").trim());
+  } catch {
+    throw new Error("La URL de Moodle debe ser una URL absoluta valida.");
+  }
+  const isLoopback = LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase());
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLoopback)) {
+    throw new Error("La URL de Moodle debe usar HTTPS. HTTP solo se permite en desarrollo local.");
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("La URL de Moodle no puede incluir credenciales, parametros ni fragmentos.");
+  }
+  return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
 }
 
 class MoodleClient {
   constructor(baseUrl, token) {
-    this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.baseUrl = normalizeServiceBaseUrl(baseUrl);
     this.token = token.trim();
   }
 
@@ -141,6 +186,7 @@ class MoodleClient {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
+      redirect: "error",
     });
 
     if (!response.ok) {
@@ -183,15 +229,16 @@ async function syncMoodle() {
     return;
   }
 
-  const settings = { baseUrl, token };
-  saveSettings(settings);
-  setState({ settings, isLoading: true, error: "", statusText: "Sincronizando..." });
+  setState({ isLoading: true, error: "", statusText: "Sincronizando..." });
 
   try {
     const client = new MoodleClient(baseUrl, token);
+    const settings = { baseUrl: client.baseUrl, token };
+    saveSettings(settings);
+    setState({ settings });
     const siteInfo = await client.call("core_webservice_get_site_info");
-    const courses = await fetchCourses(client, siteInfo.userid, baseUrl);
-    const tasks = await fetchTasks(client, courses, baseUrl);
+    const courses = await fetchCourses(client, siteInfo.userid, client.baseUrl);
+    const tasks = await fetchTasks(client, courses, client.baseUrl);
     const modulesByCourse = await fetchModules(client, courses.slice(0, 12));
     setState({
       courses,
@@ -450,6 +497,7 @@ function renderConnectionPanel() {
           <input id="token" type="password" autocomplete="off" placeholder="Token REST" value="${escapeHtml(state.settings.token || "")}" />
           <button class="ghost-button" data-action="toggle-token" type="button">Ver</button>
         </div>
+        <small>El token solo se conserva durante esta sesion del navegador.</small>
       </div>
       <button class="primary-button" data-action="sync" ${state.isLoading ? "disabled" : ""}>Conectar Moodle</button>
     </section>
@@ -561,7 +609,7 @@ function renderTask(task) {
           <span class="tag">${escapeHtml(task.type || "actividad")}</span>
         </div>
       </div>
-      <a class="link-button" href="${escapeAttribute(task.url)}" target="_blank" rel="noreferrer">Abrir en Moodle ${icons.external}</a>
+      <a class="link-button" href="${escapeAttribute(safeMoodleUrl(task.url))}" target="_blank" rel="noreferrer">Abrir en Moodle ${icons.external}</a>
     </article>
   `;
 }
@@ -589,10 +637,10 @@ function renderDetailPanel(course) {
             <span class="panel-meta">Progreso del curso</span>
           </div>
           <div class="quick-links">
-            <a class="quick-link" href="${escapeAttribute(course.viewurl)}" target="_blank" rel="noreferrer">Abrir curso ${icons.external}</a>
+            <a class="quick-link" href="${escapeAttribute(safeMoodleUrl(course.viewurl))}" target="_blank" rel="noreferrer">Abrir curso ${icons.external}</a>
             ${courseTasks
               .map(
-                (task) => `<a class="quick-link" href="${escapeAttribute(task.url)}" target="_blank" rel="noreferrer">${escapeHtml(task.title)} ${icons.external}</a>`,
+                (task) => `<a class="quick-link" href="${escapeAttribute(safeMoodleUrl(task.url))}" target="_blank" rel="noreferrer">${escapeHtml(task.title)} ${icons.external}</a>`,
               )
               .join("")}
           </div>
@@ -604,7 +652,7 @@ function renderDetailPanel(course) {
               modules.length
                 ? modules
                     .map(
-                      (module) => `<a class="module-link" href="${escapeAttribute(module.url)}" target="_blank" rel="noreferrer"><span>${escapeHtml(module.name)}</span>${icons.external}</a>`,
+                      (module) => `<a class="module-link" href="${escapeAttribute(safeMoodleUrl(module.url))}" target="_blank" rel="noreferrer"><span>${escapeHtml(module.name)}</span>${icons.external}</a>`,
                     )
                     .join("")
                 : `<div class="empty-state"><div><strong>Sin recursos cargados</strong><span>Actualiza Moodle para ver enlaces del curso.</span></div></div>`
@@ -698,6 +746,21 @@ function escapeAttribute(value) {
   return escapeHtml(value || "#");
 }
 
+function safeMoodleUrl(value) {
+  try {
+    const candidate = new URL(String(value || ""));
+    if (candidate.username || candidate.password) return "#";
+    const candidateBase = normalizeServiceBaseUrl(candidate.origin);
+    if (state.settings.baseUrl) {
+      const configured = new URL(normalizeServiceBaseUrl(state.settings.baseUrl));
+      if (candidate.origin !== configured.origin) return "#";
+    }
+    return candidateBase ? candidate.href : "#";
+  } catch {
+    return "#";
+  }
+}
+
 if (typeof document !== "undefined") {
   render();
 }
@@ -715,6 +778,10 @@ export {
   normalizeCalendarEvents,
   normalizeCourse,
   normalizeQuizzes,
+  normalizeServiceBaseUrl,
+  readSettings,
+  safeMoodleUrl,
+  saveSettings,
   stripHtml,
   uniqueBy
 };

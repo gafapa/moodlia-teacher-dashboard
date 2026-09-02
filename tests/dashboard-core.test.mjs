@@ -8,8 +8,25 @@ import {
   escapeHtml,
   normalizeCalendarEvents,
   normalizeCourse,
+  normalizeServiceBaseUrl,
+  readSettings,
+  safeMoodleUrl,
+  saveSettings,
   uniqueBy
 } from '../app.js';
+
+class MemoryStorage {
+  values = new Map();
+  getItem(key) { return this.values.get(key) ?? null; }
+  setItem(key, value) { this.values.set(key, String(value)); }
+  removeItem(key) { this.values.delete(key); }
+}
+
+class BlockedStorage {
+  getItem() { throw new DOMException('Blocked', 'SecurityError'); }
+  setItem() { throw new DOMException('Blocked', 'SecurityError'); }
+  removeItem() { throw new DOMException('Blocked', 'SecurityError'); }
+}
 
 test('Moodle client posts canonical REST fields and nested parameters', async (context) => {
   const originalFetch = globalThis.fetch;
@@ -27,6 +44,53 @@ test('Moodle client posts canonical REST fields and nested parameters', async (c
   assert.equal(request.init.body.get('wsfunction'), 'core_webservice_get_site_info');
   assert.equal(request.init.body.get('options[0][name]'), 'x');
   assert.equal(request.init.body.get('options[0][value]'), 'true');
+  assert.equal(request.init.redirect, 'error');
+});
+
+test('Moodle client rejects unsafe remote URLs before sending a token', () => {
+  assert.throws(() => new MoodleClient('http://example.test', 'token'), /HTTPS/);
+  assert.throws(() => new MoodleClient('https://user:secret@example.test', 'token'), /credenciales/);
+  assert.equal(normalizeServiceBaseUrl('http://127.0.0.1:8080/moodle/'), 'http://127.0.0.1:8080/moodle');
+});
+
+test('rendered Moodle links reject unsafe schemes and embedded credentials', () => {
+  assert.equal(safeMoodleUrl('https://example.test/course/view.php?id=4'), 'https://example.test/course/view.php?id=4');
+  assert.equal(safeMoodleUrl('https://user:secret@example.test/course/view.php?id=4'), '#');
+  assert.equal(safeMoodleUrl('http://example.test/course/view.php?id=4'), '#');
+  assert.equal(safeMoodleUrl('javascript:alert(1)'), '#');
+});
+
+test('settings keep tokens in session storage and migrate legacy local data', (context) => {
+  const originalLocalStorage = globalThis.localStorage;
+  const originalSessionStorage = globalThis.sessionStorage;
+  context.after(() => {
+    globalThis.localStorage = originalLocalStorage;
+    globalThis.sessionStorage = originalSessionStorage;
+  });
+  globalThis.localStorage = new MemoryStorage();
+  globalThis.sessionStorage = new MemoryStorage();
+
+  saveSettings({ baseUrl: 'https://example.test/moodle', token: 'session-secret' });
+  assert.equal(readSettings().token, 'session-secret');
+  assert.doesNotMatch(globalThis.localStorage.getItem('moodle-control-settings'), /session-secret/);
+
+  globalThis.localStorage.setItem('moodle-control-settings', JSON.stringify({ baseUrl: 'https://legacy.test', token: 'legacy-secret' }));
+  assert.equal(readSettings().token, 'legacy-secret');
+  assert.doesNotMatch(globalThis.localStorage.getItem('moodle-control-settings'), /legacy-secret/);
+});
+
+test('settings tolerate blocked browser storage', (context) => {
+  const originalLocalStorage = globalThis.localStorage;
+  const originalSessionStorage = globalThis.sessionStorage;
+  context.after(() => {
+    globalThis.localStorage = originalLocalStorage;
+    globalThis.sessionStorage = originalSessionStorage;
+  });
+  globalThis.localStorage = new BlockedStorage();
+  globalThis.sessionStorage = new BlockedStorage();
+
+  assert.doesNotThrow(() => saveSettings({ baseUrl: 'https://example.test', token: 'temporary' }));
+  assert.deepEqual(readSettings(), { baseUrl: '', token: '' });
 });
 
 test('Moodle client surfaces Moodle API errors', async (context) => {
