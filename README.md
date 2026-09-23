@@ -34,3 +34,9 @@ npm run check
 ```
 
 The tests cover REST request encoding, Moodle errors, nested parameters, course and calendar normalization, deduplication, bounds, and output escaping.
+
+## License
+
+Copyright (C) 2026 Pablo Gallego.
+
+This project is free software released under the GNU General Public License version 3 or later. See `LICENSE`.
