@@ -4,13 +4,13 @@ A backend-free Moodle dashboard for teachers that runs entirely in the browser. 
 
 ## Run locally
 
-Open `index.html` directly, or serve the folder with any static server:
+Serve the folder over HTTP with a static server. The application uses JavaScript modules, so opening `index.html` through a `file://` URL is not a supported launch method.
 
 ```bash
 python -m http.server 4173
 ```
 
-Then visit `http://localhost:4173`.
+Then visit `http://localhost:4173`. With Node.js 22 or newer, `npm run dev` starts the bundled static server on the same port. This local server only serves files; Moodle requests still run in the browser.
 
 ## Moodle requirements
 
